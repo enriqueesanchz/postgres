@@ -2017,9 +2017,11 @@ statext_mcv_clauselist_selectivity(PlannerInfo *root, List *clauses, int varReli
 												 mcv_totalsel);
 
 			/*
-			 * Cap to the least common MCV frequency when no MCV items matched
-			 * a full-dimensional equality query.  The queried combination is
-			 * not among the most common, so it can't be more frequent.
+			 * Cap to the least common MCV frequency (times the number of
+			 * value combinations for IN()/ANY() clauses) when no MCV items
+			 * matched a full-dimensional equality/IN query.  The queried
+			 * combinations are not among the most common, so they can't be
+			 * more frequent.
 			 */
 			if (stat_sel > mcv_leastsel)
 				stat_sel = mcv_leastsel;
