@@ -24,6 +24,7 @@
 #include "statistics/statistics.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/fmgrprotos.h"
 #include "utils/lsyscache.h"
 #include "utils/selfuncs.h"
@@ -1524,6 +1525,32 @@ pg_mcv_list_send(PG_FUNCTION_ARGS)
 }
 
 /*
+ * mcv_is_all_equality_clauses
+ *		Check if all clauses are simple equality conditions (OpExpr with eqsel
+ *		restriction estimator).  This mirrors the check done by
+ *		dependency_is_compatible_clause() in dependencies.c.
+ */
+static bool
+mcv_is_all_equality_clauses(List *clauses)
+{
+	ListCell   *lc;
+
+	foreach(lc, clauses)
+	{
+		Node	   *clause = (Node *) lfirst(lc);
+
+		if (IsA(clause, RestrictInfo))
+			clause = (Node *) ((RestrictInfo *) clause)->clause;
+
+		if (!is_opclause(clause) ||
+			get_oprrest(((OpExpr *) clause)->opno) != F_EQSEL)
+			return false;
+	}
+
+	return true;
+}
+
+/*
  * match the attribute/expression to a dimension of the statistic
  *
  * Returns the zero-based index of the matching statistics dimension.
@@ -2047,7 +2074,8 @@ mcv_clauselist_selectivity(PlannerInfo *root, StatisticExtInfo *stat,
 						   List *clauses, int varRelid,
 						   JoinType jointype, SpecialJoinInfo *sjinfo,
 						   RelOptInfo *rel,
-						   Selectivity *basesel, Selectivity *totalsel)
+						   Selectivity *basesel, Selectivity *totalsel,
+						   Selectivity *leastsel)
 {
 	int			i;
 	MCVList    *mcv;
@@ -2056,6 +2084,9 @@ mcv_clauselist_selectivity(PlannerInfo *root, StatisticExtInfo *stat,
 
 	/* match/mismatch bitmap for each MCV item */
 	bool	   *matches = NULL;
+
+	/* default: no cap on combined selectivity */
+	*leastsel = 1.0;
 
 	/* load the MCV list stored in the statistics object */
 	mcv = statext_mcv_load(stat->statOid, rte->inh);
@@ -2077,6 +2108,18 @@ mcv_clauselist_selectivity(PlannerInfo *root, StatisticExtInfo *stat,
 			s += mcv->items[i].frequency;
 		}
 	}
+
+	/*
+	 * When no MCV item matched and we have one equality clause per MCV
+	 * dimension, cap the selectivity to the least common MCV frequency.
+	 * The combination is not among the most common, so it can't be more
+	 * frequent than the least common tracked combination.  We only apply
+	 * this for simple equality operators; range or IN() predicates can
+	 * legitimately have zero MCV matches while still being common.
+	 */
+	if (s == 0.0 && mcv->ndimensions == list_length(clauses) &&
+		mcv_is_all_equality_clauses(clauses))
+		*leastsel = mcv->items[mcv->nitems - 1].frequency;
 
 	return s;
 }
