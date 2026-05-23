@@ -1442,6 +1442,11 @@ SELECT * FROM check_estimated_rows('SELECT * FROM mcv_lists_partial WHERE (a = 0
 
 SELECT * FROM check_estimated_rows('SELECT * FROM mcv_lists_partial WHERE (a = 0 AND b = 0) OR (a = 0 AND c = 0) OR (b = 0 AND c = 0)');
 
+-- values not in any MCV item (baseline without statistics)
+SELECT * FROM check_estimated_rows('SELECT * FROM mcv_lists_partial WHERE a = 200 AND b = 200 AND c = 200');
+
+SELECT * FROM check_estimated_rows('SELECT * FROM mcv_lists_partial WHERE a = ANY(ARRAY[200, 201]) AND b = ANY(ARRAY[200, 201]) AND c = ANY(ARRAY[200, 201])');
+
 CREATE STATISTICS mcv_lists_partial_stats (mcv) ON a, b, c
   FROM mcv_lists_partial;
 
@@ -1463,7 +1468,60 @@ SELECT * FROM check_estimated_rows('SELECT * FROM mcv_lists_partial WHERE (a = 0
 
 SELECT * FROM check_estimated_rows('SELECT * FROM mcv_lists_partial WHERE (a = 0 AND b = 0) OR (a = 0 AND c = 0) OR (b = 0 AND c = 0)');
 
+-- values not in MCV (100..3999): full dimensional AND → cap to least MCV frequency
+SELECT * FROM check_estimated_rows('SELECT * FROM mcv_lists_partial WHERE a = 200 AND b = 200 AND c = 200');
+
+-- partial MCV coverage (2 of 3 dimensions) → no cap
+SELECT * FROM check_estimated_rows('SELECT * FROM mcv_lists_partial WHERE a = 200 AND b = 200');
+
+-- OR clause → no cap
+SELECT * FROM check_estimated_rows('SELECT * FROM mcv_lists_partial WHERE a = 200 OR b = 200 OR c = 200');
+
+-- inequality operator → no cap (mcv_cap_multiplier returns 0 for non-equality ops)
+SELECT * FROM check_estimated_rows('SELECT * FROM mcv_lists_partial WHERE a > 200 AND b = 200 AND c = 200');
+
+-- IN/ANY with values not in MCV, full dimensional coverage → cap applies with multiplier
+SELECT * FROM check_estimated_rows('SELECT * FROM mcv_lists_partial WHERE a = ANY(ARRAY[200, 201]) AND b = ANY(ARRAY[200, 201]) AND c = ANY(ARRAY[200, 201])');
+
+-- partial MCV coverage with IN/ANY → no cap
+SELECT * FROM check_estimated_rows('SELECT * FROM mcv_lists_partial WHERE a = ANY(ARRAY[200, 201]) AND b = ANY(ARRAY[200, 201])');
+
+-- IN/ANY mixed with inequality → no cap
+SELECT * FROM check_estimated_rows('SELECT * FROM mcv_lists_partial WHERE a = ANY(ARRAY[200, 201]) AND b > 200 AND c = 200');
+
 DROP TABLE mcv_lists_partial;
+
+-- Test that the MCV selectivity cap reduces over-estimates for negatively
+-- correlated columns.  a=0 pairs only with b=1..99 and b=0 pairs only with
+-- a=1..99, so the combination (a=0, b=0) never occurs.  Per-column marginals
+-- are P(a=0)=0.5 and P(b=0)=0.5, so the independence estimate is 0.25 * N.
+-- After building MCV statistics the cap limits the combined estimate to the
+-- least-common MCV frequency (100/19800 ≈ 0.005), eliminating the bulk of
+-- the over-estimation introduced by negative correlation.
+CREATE TABLE mcv_negcor (a INT, b INT) WITH (autovacuum_enabled = off);
+
+INSERT INTO mcv_negcor
+    SELECT 0, b FROM generate_series(1, 99) b, generate_series(1, 100) r;
+
+INSERT INTO mcv_negcor
+    SELECT a, 0 FROM generate_series(1, 99) a, generate_series(1, 100) r;
+
+ANALYZE mcv_negcor;
+
+-- Without MCV statistics: independence gives 0.5 * 0.5 * 19800 = 4950 rows.
+SELECT * FROM check_estimated_rows('SELECT * FROM mcv_negcor WHERE a = 0 AND b = 0');
+
+CREATE STATISTICS mcv_negcor_stats (mcv) ON a, b FROM mcv_negcor;
+ANALYZE mcv_negcor;
+
+-- With MCV statistics and cap: bounded by least MCV frequency (≈ 100 rows).
+-- Without the cap the MCV formula alone would still give ≈ 2450 rows.
+SELECT * FROM check_estimated_rows('SELECT * FROM mcv_negcor WHERE a = 0 AND b = 0');
+
+-- The same cap applies to IN/ANY equality clauses.
+SELECT * FROM check_estimated_rows('SELECT * FROM mcv_negcor WHERE a = 0 AND b IN (0)');
+
+DROP TABLE mcv_negcor;
 
 -- check the ability to use multiple MCV lists
 CREATE TABLE mcv_lists_multi (
