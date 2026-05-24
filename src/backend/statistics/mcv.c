@@ -1526,8 +1526,8 @@ pg_mcv_list_send(PG_FUNCTION_ARGS)
 
 /*
  * mcv_cap_multiplier
- *		Compute a multiplier for capping combined selectivity to the least
- *		common MCV frequency when no MCV items matched.
+ * 		Compute a multiplier for capping combined selectivity to the least
+ * 		common MCV frequency.
  *
  * Returns 0 if the cap should not be applied (unsupported clause types).
  * Returns >= 1 as the number of distinct value combinations the clauses
@@ -2105,6 +2105,7 @@ mcv_clauselist_selectivity(PlannerInfo *root, StatisticExtInfo *stat,
 						   Selectivity *cap)
 {
 	int			i;
+	int64		matched_count = 0;
 	MCVList    *mcv;
 	Selectivity s = 0.0;
 	RangeTblEntry *rte = root->simple_rte_array[rel->relid];
@@ -2133,22 +2134,24 @@ mcv_clauselist_selectivity(PlannerInfo *root, StatisticExtInfo *stat,
 		{
 			*basesel += mcv->items[i].base_frequency;
 			s += mcv->items[i].frequency;
+			matched_count++;
 		}
 	}
 
 	/*
-	 * When no MCV item matched and there is one equality clause per MCV
-	 * dimension, cap the selectivity to the least common MCV frequency. The
+	 * When there is one equality/IN clause per MCV dimension, cap the
+	 * contribution of value combinations not found in the MCV.  Each such
 	 * combination is not among the most common, so it can't be more frequent
 	 * than the least common tracked combination.
 	 */
-	if (s == 0.0 && mcv->ndimensions == list_length(clauses))
+	if (mcv->ndimensions == list_length(clauses))
 	{
 		int64		cap_mult = mcv_cap_multiplier(clauses);
+		int64		non_mcv_mult = cap_mult - matched_count;
 
-		if (cap_mult > 0)
+		if (non_mcv_mult > 0)
 		{
-			*cap = cap_mult * mcv->items[mcv->nitems - 1].frequency;
+			*cap = s + non_mcv_mult * mcv->items[mcv->nitems - 1].frequency;
 			CLAMP_PROBABILITY(*cap);
 		}
 	}

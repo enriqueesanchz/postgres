@@ -2016,10 +2016,7 @@ statext_mcv_clauselist_selectivity(PlannerInfo *root, List *clauses, int varReli
 												 mcv_basesel,
 												 mcv_totalsel);
 
-			/*
-			 * Cap to the least common MCV frequency when no MCV items
-			 * matched.
-			 */
+			/* Cap the contribution of values not found in the MCV. */
 			if (stat_sel > mcv_cap)
 				stat_sel = mcv_cap;
 

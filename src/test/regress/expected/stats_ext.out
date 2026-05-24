@@ -2969,7 +2969,7 @@ SELECT * FROM check_estimated_rows('SELECT * FROM mcv_cap WHERE a = 0 AND b = 0'
 SELECT * FROM check_estimated_rows('SELECT * FROM mcv_cap WHERE a = 0 AND b IN (0, 99)');
  estimated | actual 
 -----------+--------
-      5050 |    100
+       200 |    100
 (1 row)
 
 -- no MCV match
