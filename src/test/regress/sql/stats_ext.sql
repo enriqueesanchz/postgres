@@ -1491,10 +1491,10 @@ ANALYZE mcv_cap;
 -- with MCV statistics: bounded by least MCV frequency
 SELECT * FROM check_estimated_rows('SELECT * FROM mcv_cap WHERE a = 0 AND b = 0');
 
--- IN/ANY equality clauses are not supported, partial MCV match (a=0, b=99)
+-- partial MCV match (a=0, b=99)
 SELECT * FROM check_estimated_rows('SELECT * FROM mcv_cap WHERE a = 0 AND b IN (0, 99)');
 
--- IN/ANY equality clauses are not supported, no MCV match
+-- no MCV match
 SELECT * FROM check_estimated_rows('SELECT * FROM mcv_cap WHERE a = 0 AND b IN (0, 100)');
 
 DROP TABLE mcv_cap;

@@ -1525,14 +1525,19 @@ pg_mcv_list_send(PG_FUNCTION_ARGS)
 }
 
 /*
- * mcv_is_all_equality_clauses
- *		Check if all clauses are simple equality conditions (OpExpr with eqsel
- *		restriction estimator).  This mirrors the check done by
- *		dependency_is_compatible_clause() in dependencies.c.
+ * mcv_cap_multiplier
+ *		Compute a multiplier for capping combined selectivity to the least
+ *		common MCV frequency when no MCV items matched.
+ *
+ * Returns 0 if the cap should not be applied (unsupported clause types).
+ * Returns >= 1 as the number of distinct value combinations the clauses
+ * could match: 1 for each equality clause, N for each IN/ANY clause with
+ * N elements.
  */
-static bool
-mcv_is_all_equality_clauses(List *clauses)
+static int64
+mcv_cap_multiplier(List *clauses)
 {
+	int64		multiplier = 1;
 	ListCell   *lc;
 
 	foreach(lc, clauses)
@@ -1542,12 +1547,34 @@ mcv_is_all_equality_clauses(List *clauses)
 		if (IsA(clause, RestrictInfo))
 			clause = (Node *) ((RestrictInfo *) clause)->clause;
 
-		if (!is_opclause(clause) ||
-			get_oprrest(((OpExpr *) clause)->opno) != F_EQSEL)
-			return false;
+		if (is_opclause(clause))
+		{
+			/* Simple equality: factor 1 */
+			if (get_oprrest(((OpExpr *) clause)->opno) != F_EQSEL)
+				return 0;
+		}
+		else if (IsA(clause, ScalarArrayOpExpr))
+		{
+			ScalarArrayOpExpr *saop = (ScalarArrayOpExpr *) clause;
+			Node	   *arg;
+			ArrayType  *arr;
+
+			/* Only ANY/IN with equality operator */
+			if (!saop->useOr || get_oprrest(saop->opno) != F_EQSEL)
+				return 0;
+
+			arg = (Node *) lsecond(saop->args);
+			if (!IsA(arg, Const) || ((Const *) arg)->constisnull)
+				return 0;
+
+			arr = DatumGetArrayTypeP(((Const *) arg)->constvalue);
+			multiplier *= ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
+		}
+		else
+			return 0;			/* unsupported clause type */
 	}
 
-	return true;
+	return multiplier;
 }
 
 /*
@@ -2115,9 +2142,16 @@ mcv_clauselist_selectivity(PlannerInfo *root, StatisticExtInfo *stat,
 	 * combination is not among the most common, so it can't be more frequent
 	 * than the least common tracked combination.
 	 */
-	if (s == 0.0 && mcv->ndimensions == list_length(clauses) &&
-		mcv_is_all_equality_clauses(clauses))
-		*cap = mcv->items[mcv->nitems - 1].frequency;
+	if (s == 0.0 && mcv->ndimensions == list_length(clauses))
+	{
+		int64		cap_mult = mcv_cap_multiplier(clauses);
+
+		if (cap_mult > 0)
+		{
+			*cap = cap_mult * mcv->items[mcv->nitems - 1].frequency;
+			CLAMP_PROBABILITY(*cap);
+		}
+	}
 
 	return s;
 }
