@@ -1915,7 +1915,8 @@ statext_mcv_clauselist_selectivity(PlannerInfo *root, List *clauses, int varReli
 							overlap_basesel,
 							mcv_totalsel,
 							clause_sel,
-							overlap_sel;
+							overlap_sel,
+							clause_cap;
 
 				/*
 				 * "Simple" selectivity of the next clause and its overlap
@@ -1945,7 +1946,8 @@ statext_mcv_clauselist_selectivity(PlannerInfo *root, List *clauses, int varReli
 													&mcv_basesel,
 													&overlap_mcvsel,
 													&overlap_basesel,
-													&mcv_totalsel);
+													&mcv_totalsel,
+													&clause_cap);
 
 				/*
 				 * Combine the simple and multi-column estimates.
@@ -1959,10 +1961,16 @@ statext_mcv_clauselist_selectivity(PlannerInfo *root, List *clauses, int varReli
 				if (bms_is_member(listidx, simple_clauses))
 					clause_sel = simple_sel;
 				else
+				{
 					clause_sel = mcv_combine_selectivities(simple_sel,
 														   mcv_sel,
 														   mcv_basesel,
 														   mcv_totalsel);
+
+					/* Cap the contribution of values not found in the MCV. */
+					if (clause_sel > clause_cap)
+						clause_sel = clause_cap;
+				}
 
 				overlap_sel = mcv_combine_selectivities(overlap_simple_sel,
 														overlap_mcvsel,
@@ -1989,6 +1997,7 @@ statext_mcv_clauselist_selectivity(PlannerInfo *root, List *clauses, int varReli
 						mcv_sel,
 						mcv_basesel,
 						mcv_totalsel,
+						mcv_cap,
 						stat_sel;
 
 			/*
@@ -2006,13 +2015,18 @@ statext_mcv_clauselist_selectivity(PlannerInfo *root, List *clauses, int varReli
 			mcv_sel = mcv_clauselist_selectivity(root, stat, stat_clauses,
 												 varRelid, jointype, sjinfo,
 												 rel, &mcv_basesel,
-												 &mcv_totalsel);
+												 &mcv_totalsel,
+												 &mcv_cap);
 
 			/* Combine the simple and multi-column estimates. */
 			stat_sel = mcv_combine_selectivities(simple_sel,
 												 mcv_sel,
 												 mcv_basesel,
 												 mcv_totalsel);
+
+			/* Cap the contribution of values not found in the MCV. */
+			if (stat_sel > mcv_cap)
+				stat_sel = mcv_cap;
 
 			/* Factor this into the overall result */
 			sel *= stat_sel;

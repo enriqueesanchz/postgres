@@ -24,6 +24,7 @@
 #include "statistics/statistics.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/fmgrprotos.h"
 #include "utils/lsyscache.h"
 #include "utils/selfuncs.h"
@@ -1524,6 +1525,93 @@ pg_mcv_list_send(PG_FUNCTION_ARGS)
 }
 
 /*
+ * mcv_cap_multiplier
+ * 		Compute a multiplier for capping combined selectivity to the least
+ * 		common MCV frequency.
+ *
+ * Returns 0 if the cap should not be applied (unsupported clause types).
+ * Returns >= 1 as the number of distinct value combinations the clauses
+ * could match: 1 for each equality clause, N for each IN/ANY clause with
+ * N elements.
+ */
+static int64
+mcv_cap_multiplier(List *clauses)
+{
+	int64		multiplier = 1;
+	ListCell   *lc;
+
+	foreach(lc, clauses)
+	{
+		Node	   *clause = (Node *) lfirst(lc);
+
+		if (IsA(clause, RestrictInfo))
+			clause = (Node *) ((RestrictInfo *) clause)->clause;
+
+		if (is_opclause(clause))
+		{
+			/* Simple equality: factor 1 */
+			if (get_oprrest(((OpExpr *) clause)->opno) != F_EQSEL)
+				return 0;
+		}
+		else if (IsA(clause, ScalarArrayOpExpr))
+		{
+			ScalarArrayOpExpr *saop = (ScalarArrayOpExpr *) clause;
+			Node	   *arg;
+			ArrayType  *arr;
+
+			/* Only ANY/IN with equality operator */
+			if (!saop->useOr || get_oprrest(saop->opno) != F_EQSEL)
+				return 0;
+
+			arg = (Node *) lsecond(saop->args);
+			if (!IsA(arg, Const) || ((Const *) arg)->constisnull)
+				return 0;
+
+			arr = DatumGetArrayTypeP(((Const *) arg)->constvalue);
+			multiplier *= ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
+		}
+		else
+			return 0;			/* unsupported clause type */
+	}
+
+	return multiplier;
+}
+
+/*
+ * mcv_compute_cap
+ *		Compute a selectivity cap based on the least common MCV frequency.
+ *
+ * When one equality/IN clause covers each MCV dimension, value combinations
+ * not found in the MCV can't be more frequent than the least common tracked
+ * combination.  The cap is: matched MCV frequency plus the number of
+ * non-MCV combinations times the least common MCV frequency.
+ *
+ * Returns 1.0 (no cap) when the clauses don't fully cover all dimensions
+ * or contain unsupported clause types.
+ */
+static Selectivity
+mcv_compute_cap(MCVList *mcv, List *clauses, Selectivity mcv_sel,
+					 int64 matched_count)
+{
+	int64		cap_mult;
+	int64		non_mcv_mult;
+	Selectivity cap;
+
+	if (list_length(clauses) != mcv->ndimensions)
+		return 1.0;
+
+	cap_mult = mcv_cap_multiplier(clauses);
+	non_mcv_mult = cap_mult - matched_count;
+
+	if (non_mcv_mult <= 0)
+		return 1.0;
+
+	cap = mcv_sel + non_mcv_mult * mcv->items[mcv->nitems - 1].frequency;
+	CLAMP_PROBABILITY(cap);
+	return cap;
+}
+
+/*
  * match the attribute/expression to a dimension of the statistic
  *
  * Returns the zero-based index of the matching statistics dimension.
@@ -2047,15 +2135,20 @@ mcv_clauselist_selectivity(PlannerInfo *root, StatisticExtInfo *stat,
 						   List *clauses, int varRelid,
 						   JoinType jointype, SpecialJoinInfo *sjinfo,
 						   RelOptInfo *rel,
-						   Selectivity *basesel, Selectivity *totalsel)
+						   Selectivity *basesel, Selectivity *totalsel,
+						   Selectivity *cap)
 {
 	int			i;
+	int64		matched_count = 0;
 	MCVList    *mcv;
 	Selectivity s = 0.0;
 	RangeTblEntry *rte = root->simple_rte_array[rel->relid];
 
 	/* match/mismatch bitmap for each MCV item */
 	bool	   *matches = NULL;
+
+	/* default: no cap on combined selectivity */
+	*cap = 1.0;
 
 	/* load the MCV list stored in the statistics object */
 	mcv = statext_mcv_load(stat->statOid, rte->inh);
@@ -2075,8 +2168,17 @@ mcv_clauselist_selectivity(PlannerInfo *root, StatisticExtInfo *stat,
 		{
 			*basesel += mcv->items[i].base_frequency;
 			s += mcv->items[i].frequency;
+			matched_count++;
 		}
 	}
+
+	/*
+	 * When there is one equality/IN clause per MCV dimension, cap the
+	 * contribution of value combinations not found in the MCV.  Each such
+	 * combination is not among the most common, so it can't be more frequent
+	 * than the least common tracked combination.
+	 */
+	*cap = mcv_compute_cap(mcv, clauses, s, matched_count);
 
 	return s;
 }
@@ -2124,11 +2226,16 @@ Selectivity
 mcv_clause_selectivity_or(PlannerInfo *root, StatisticExtInfo *stat,
 						  MCVList *mcv, Node *clause, bool **or_matches,
 						  Selectivity *basesel, Selectivity *overlap_mcvsel,
-						  Selectivity *overlap_basesel, Selectivity *totalsel)
+						  Selectivity *overlap_basesel, Selectivity *totalsel,
+						  Selectivity *clause_cap)
 {
 	Selectivity s = 0.0;
 	bool	   *new_matches;
 	int			i;
+	int64		matched_count = 0;
+
+	/* default: no cap on clause selectivity */
+	*clause_cap = 1.0;
 
 	/* build the OR-matches bitmap, if not built already */
 	if (*or_matches == NULL)
@@ -2155,6 +2262,7 @@ mcv_clause_selectivity_or(PlannerInfo *root, StatisticExtInfo *stat,
 		{
 			s += mcv->items[i].frequency;
 			*basesel += mcv->items[i].base_frequency;
+			matched_count++;
 
 			if ((*or_matches)[i])
 			{
@@ -2168,6 +2276,20 @@ mcv_clause_selectivity_or(PlannerInfo *root, StatisticExtInfo *stat,
 	}
 
 	pfree(new_matches);
+
+	/*
+	 * When there is one equality/IN clause per MCV dimension, cap the
+	 * contribution of value combinations not found in the MCV.  Each such
+	 * combination is not among the most common, so it can't be more frequent
+	 * than the least common tracked combination.
+	 */
+	if (is_andclause(clause))
+	{
+		BoolExpr   *bexpr = (BoolExpr *) clause;
+
+		*clause_cap = mcv_compute_cap(mcv, bexpr->args, s,
+												matched_count);
+	}
 
 	return s;
 }

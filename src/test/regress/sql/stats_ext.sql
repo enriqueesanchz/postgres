@@ -1465,6 +1465,46 @@ SELECT * FROM check_estimated_rows('SELECT * FROM mcv_lists_partial WHERE (a = 0
 
 DROP TABLE mcv_lists_partial;
 
+-- P(a=0)=0.5 and P(b=0)=0.5, so the independence estimate is 0.25 * N.
+-- After building MCV statistics the cap limits the combined estimate to the
+-- least-common MCV frequency, eliminating most of the over-estimation.
+CREATE TABLE mcv_cap (a INT, b INT, c INT DEFAULT 0) WITH (autovacuum_enabled = off);
+
+INSERT INTO mcv_cap
+    SELECT 0, b FROM generate_series(1, 99) b, generate_series(1, 100) r;
+
+INSERT INTO mcv_cap
+    SELECT a, 0 FROM generate_series(1, 99) a, generate_series(1, 100) r;
+
+ANALYZE mcv_cap;
+
+-- without MCV statistics: independence gives 0.5 * 0.5 * 19800 = 4950 rows
+SELECT * FROM check_estimated_rows('SELECT * FROM mcv_cap WHERE a = 0 AND b = 0');
+
+SELECT * FROM check_estimated_rows('SELECT * FROM mcv_cap WHERE a = 0 AND b IN (0, 99)');
+
+SELECT * FROM check_estimated_rows('SELECT * FROM mcv_cap WHERE a = 0 AND b IN (0, 100)');
+
+CREATE STATISTICS mcv_cap_stats (mcv) ON a, b FROM mcv_cap;
+ANALYZE mcv_cap;
+
+-- with MCV statistics: bounded by least MCV frequency
+SELECT * FROM check_estimated_rows('SELECT * FROM mcv_cap WHERE a = 0 AND b = 0');
+
+-- partial MCV match (a=0, b=99)
+SELECT * FROM check_estimated_rows('SELECT * FROM mcv_cap WHERE a = 0 AND b IN (0, 99)');
+
+-- no MCV match
+SELECT * FROM check_estimated_rows('SELECT * FROM mcv_cap WHERE a = 0 AND b IN (0, 100)');
+
+-- partial MCV match inside OR (a=0, b=99)
+SELECT * FROM check_estimated_rows('SELECT * FROM mcv_cap WHERE c = 1 OR (a = 0 AND b IN (0, 99))');
+
+-- no MCV match inside OR
+SELECT * FROM check_estimated_rows('SELECT * FROM mcv_cap WHERE c = 1 OR (a = 0 AND b = 0)');
+
+DROP TABLE mcv_cap;
+
 -- check the ability to use multiple MCV lists
 CREATE TABLE mcv_lists_multi (
 	a INTEGER,
