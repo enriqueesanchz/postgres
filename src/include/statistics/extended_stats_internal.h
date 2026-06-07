@@ -130,7 +130,8 @@ extern Selectivity mcv_clauselist_selectivity(PlannerInfo *root,
 											  RelOptInfo *rel,
 											  Selectivity *basesel,
 											  Selectivity *totalsel,
-											  Selectivity *cap);
+											  Selectivity *cap,
+											  uint32 *nitems);
 
 extern Selectivity mcv_clause_selectivity_or(PlannerInfo *root,
 											 StatisticExtInfo *stat,
