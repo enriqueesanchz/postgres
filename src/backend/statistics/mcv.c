@@ -2048,7 +2048,7 @@ mcv_clauselist_selectivity(PlannerInfo *root, StatisticExtInfo *stat,
 						   JoinType jointype, SpecialJoinInfo *sjinfo,
 						   RelOptInfo *rel,
 						   Selectivity *basesel, Selectivity *totalsel,
-						   Selectivity *cap)
+						   Selectivity *cap, uint32 *nitems)
 {
 	int			i;
 	MCVList    *mcv;
@@ -2063,6 +2063,8 @@ mcv_clauselist_selectivity(PlannerInfo *root, StatisticExtInfo *stat,
 
 	/* load the MCV list stored in the statistics object */
 	mcv = statext_mcv_load(stat->statOid, rte->inh);
+
+	*nitems = mcv->nitems;
 
 	/* build a match bitmap for the clauses */
 	matches = mcv_get_match_bitmap(root, clauses, stat->keys, stat->exprs,
